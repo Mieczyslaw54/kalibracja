@@ -1,26 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-piston_calibration_csv.py  (wersja z podsumowaniami per segment i kompaktowym PDF)
------------------------------------------------------------------------
-• Wejście: CSV z pomiarami (separator ; lub ,; nagłówki nieczułe na wielkość liter).
-• Wyjścia:
-   - {tytuł}_wyniki_i_budzety.csv               (wyniki pojedynczych pomiarów)
-   - {tytuł}_budzety.csv                        (wiersze budżetów u dla Vn; zawiera kolumnę segment_k)
-   - {tytuł}_podsumowanie.csv                   (podsumowanie całej serii)
-   - {tytuł}_podsumowanie_per_segment.csv       (podsumowanie per segment k)
-   - {tytuł}_budzety.pdf                        (PDF: sekcje per segment k + budżety poszczególnych pomiarów)
-
-• PDF – „compact”: w tabeli budżetów renderujemy skrócone kolumny:
-   Xi | xi | u(xi) | rozkład | Ci | ui(y) | % udział
-   (mniejsze czcionki, zawijanie, stałe szerokości – mieści się na A4 poziomo).
+piston_calibration_csv.py — wsad / ręczny, budżety PDF (compact/full), aliasy nagłówków
 """
 
 import csv
 import os
 import math
-import numpy as np
 import re
+import numpy as np
 
 # ===================== Woda: Kell + ściśliwość =====================
 a0 = 999.83952
@@ -82,8 +70,6 @@ def parse_float(val):
     except Exception:
         return None
 
-
-
 # =========================================
 # Aliasy nazw kolumn (case-insensitive, po normalize_keys)
 # =========================================
@@ -94,10 +80,10 @@ ALIASES = {
     'p':     ['p','p [bar]','p[bar]','p (bar)','p(g)','p_g','p[g]'],
     'rod':   ['rod','ρ_od','rho_od','rho20','rod [kg/m³]','rod [kg/m3]','rho [kg/m³]','rho [kg/m3]'],
     'um':    ['um','u(m)','um [kg]','u_m'],
-    'ut':    ['ut','u(t)','ut [°c]','ut[°c]','u_t','ut [degc]','ut[degc]','ut [c]','ut [°c]','ut [oc]','ut [o c]'],
+    'ut':    ['ut','u(t)','ut [°c]','ut[°c]','u_t','ut [degc]','ut[degc]','ut [c]','ut [°c]','ut [oc]','ut [o c]','ut [°c]'],
     'up':    ['up','u(p)','up [bar]','u_p','up[bar]'],
     'urod':  ['urod','u(rod)','u_rho','u_ród','u_rho_od','u(ρ_od)','u(rho)'],
-    'dtmax': ['dtmax','deltatmax','Δtmax','delta_t_max','dt_max','Δt_max','d t max','dTmax'],
+    'dtmax': ['dtmax','deltatmax','Δtmax','delta_t_max','dt_max','Δt_max','d t max','dtmax [°c]','dTmax'],
     'd_mm':  ['d_mm','d [mm]','dmm','średnica','srednica','średnica [mm]','srednica [mm]'],
     'z_mm':  ['z_mm','z [mm]','zmm','grubość','grubosc','grubość [mm]','grubosc [mm]','ścianka','scianka'],
     'e_gpa': ['e_gpa','e [gpa]','e[gpa]','e_gpa'],
@@ -120,7 +106,7 @@ def get_num(rn, key):
             val = parse_float(v)
             if val is not None:
                 return val
-    # fuzzy: klucze zawierające wzorzec (usuń nielitery)
+    # fuzzy
     patt = re.compile(r'[^a-z0-9]+')
     target = patt.sub('', key)
     for kname, v in rn.items():
@@ -131,20 +117,11 @@ def get_num(rn, key):
             val = parse_float(v)
             if val is not None:
                 return val
-        # luźniej: ut -> zaczyna się od 'ut'
         if key in ('ut','um','up','urod') and kn.startswith(key):
             val = parse_float(v)
             if val is not None:
                 return val
     return None
-    if val is None or val == "":
-        return None
-    if isinstance(val, str):
-        val = val.replace(",", ".").strip()
-    try:
-        return float(val)
-    except Exception:
-        return None
 
 # ===================== Modele fizyczne =====================
 def B_of_T(T): return b0 + b1*T + b2*T**2
@@ -158,19 +135,37 @@ def objetosc(m, T, p_bar, rod):
 def steel_reduction_partials(T, p_bar_gauge, *, Tn=20.0, pn_bar_gauge=0.0,
                              alpha_v=ALPHA_V_STEEL, D_mm=D_MM_DEFAULT, z_mm=Z_MM_DEFAULT,
                              E_GPa=E_GPA_DEFAULT, nu=NU_DEFAULT, closed_ends=True):
+    """
+    Współczynnik redukcji F = F_T * F_p:
+      • F_T – termiczny dla stali (objętościowy αV),
+      • F_p – ciśnieniowy z ściśliwości stali (moduł objętościowy K), NIE z geometrii cylindra.
+    Zwraca: F, dF/dT, dF/dp_bar, F_T, F_p
+    """
+
+    # --- Składnik temperaturowy (stal) ---
     dT = T - Tn
-    dp_bar = (p_bar_gauge - pn_bar_gauge)
-    p_Pa = dp_bar * 1e5
-    D = D_mm/1000.0; t = z_mm/1000.0; E = E_GPa*1e9
-    coeff = (5.0 - 4.0*nu)/4.0 if closed_ends else (1.0 - 0.5*nu)
-    one_plus = 1.0 + (p_Pa * D)/(E * t) * coeff
-    F_T = 1.0/(1.0 + alpha_v*dT)
-    F_p = 1.0/one_plus
-    F   = F_T * F_p
-    dF_dT = (-alpha_v)/(1.0 + alpha_v*dT)**2 * F_p
-    kbar = (D/(E*t)) * coeff * 1e5
-    dF_dpbar = -F_T * kbar / (one_plus**2)
+    F_T    = 1.0 / (1.0 + alpha_v * dT)
+    dF_dT  = (-alpha_v) / (1.0 + alpha_v * dT)**2  # pochodna F_T po T
+    # (na razie bez mnożenia przez F_p; zrobimy to po wyliczeniu F_p)
+
+    # --- Składnik ciśnieniowy (ściśliwość stali) ---
+    # p_bar_gauge w bar(g) -> Pa
+    p_Pa = (p_bar_gauge - pn_bar_gauge) * 1e5
+    E = E_GPa * 1e9
+    # Moduł objętościowy: K = E / (3(1-2ν))
+    K = E / (3.0 * (1.0 - 2.0 * nu))
+    # ΔV/V |_p = - p / K  ->  F_p = 1 / (1 - p/K)
+    denom = 1.0 - (p_Pa / K)
+    F_p = 1.0 / denom
+    # dF_p / d(p_bar) — po bar(g): dp_bar * 1e5 = dp_Pa
+    dF_dpbar = (1e5 / K) / (denom**2)
+
+    # --- Składanie i pochodne łączne ---
+    F        = F_T * F_p
+    dF_dT    = dF_dT * F_p        # łańcuchowo: ∂F/∂T = (∂F_T/∂T) * F_p
+    dF_dpbar = F_T * dF_dpbar     # ∂F/∂p = F_T * (∂F_p/∂p)
     return F, dF_dT, dF_dpbar, F_T, F_p
+
 
 # ===================== Vmag =====================
 def Vmag_for_segment(k):
@@ -212,7 +207,8 @@ def append_budget_rows_piston(budget_path, meas_id, label, segment_k,
     rows.append(["ρ_od", rod, "kg/m³",urod, "kg/m³","normalny",   Crod, "l·m³/kg",  abs(Crod)*urod, "l", pct(uVn, abs(Crod)*urod)])
     rows.append(["ΔV_mag", "", "l", dTmax, "°C", "prostokątny", 1.0, "–", uVmag, "l", pct(uVn, uVmag)])
     rows.append(["ΔV_l",   "", "l", "",    "",   "trójkątny",   1.0, "–", uVl,   "l", pct(uVn, uVl)])
-    rows.append(["SUMA", "", "", "", "", "", "", "", "", "", uVn, "l", 100.0])
+    # SUMA w CSV nie jest wiążąca dla PDF; w PDF przeliczamy z komponentów
+    rows.append(["SUMA", "", "", "", "", "", "", "", uVn, "l", 100.0])
 
     for r in rows:
         write_row(budget_path, [meas_id, segment_k, label, "Vn [l]"] + r, delimiter=delimiter)
@@ -308,12 +304,19 @@ def process_measurement(row_norm, out_results, out_budgets, meas_id, title_label
     )
     return True
 
-# ===================== PDF generator (compact, per segment) =====================
-
+# ===================== PDF generator (compact/full) =====================
 def generate_budgets_pdf(title, budget_csv_path, results_csv_path, out_pdf_path, mode='compact'):
+    """
+    mode: 'compact' -> Xi, xi, u(xi), rozkład, Ci, ui(y), % udział
+          'full'    -> + jednostki: jedn_xi, jedn_u, jedn_Ci, jedn_ui
+    Dodatki:
+      • Nagłówek z trybem (COMPACT/FULL), żeby pliki nie wyglądały identycznie.
+      • SUMA liczona w PDF: sqrt(sum(ui(y)^2)) z wierszy składników (bez wiązania do wiersza 'SUMA' z CSV).
+      • Podsumowania segmentów -> jedna wspólna tabela (brak osobnych stron per k).
+    """
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
@@ -323,7 +326,7 @@ def generate_budgets_pdf(title, budget_csv_path, results_csv_path, out_pdf_path,
     def register_polish_font():
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/liberationsans-regular.ttf",
             "C:\\Windows\\Fonts\\arial.ttf",
         ]
         for c in candidates:
@@ -336,7 +339,6 @@ def generate_budgets_pdf(title, budget_csv_path, results_csv_path, out_pdf_path,
         return "Helvetica"
     font_main = register_polish_font()
 
-    # --- Helpers ---
     def fmt(x, sig=6):
         try:
             xf = float(str(x).replace(",", ".").strip())
@@ -351,7 +353,7 @@ def generate_budgets_pdf(title, budget_csv_path, results_csv_path, out_pdf_path,
         except Exception:
             return str(x)
 
-    # Read results to map id->(k,Vn,uVn) and per-k arrays
+    # Read results -> per-k arrays
     meas_to_k = {}
     per_k_vals = {}
     with open(results_csv_path, "r", encoding="utf-8-sig", newline="") as fr:
@@ -360,17 +362,17 @@ def generate_budgets_pdf(title, budget_csv_path, results_csv_path, out_pdf_path,
             mid = str(row.get("id") or row.get("pomiar_id") or "").strip()
             try: k = int(float((row.get("k") or "0").replace(",", ".")))
             except: k = 0
+            meas_to_k[mid] = k
             try: Vn = float((row.get("Vn [l]") or "nan").replace(",", "."))
             except: Vn = None
             try: uVn = float((row.get("u(Vn) [l]") or "nan").replace(",", "."))
             except: uVn = None
-            meas_to_k[mid] = k
-            if Vn is not None and uVn is not None:
+            if (Vn is not None) and (uVn is not None):
                 per_k_vals.setdefault(k, {"Vn": [], "uVn": []})
                 per_k_vals[k]["Vn"].append(Vn)
                 per_k_vals[k]["uVn"].append(uVn)
 
-    # Read budgets and group by segment->measurement
+    # Read budgets -> group by seg -> meas
     data_by_seg = {}
     with open(budget_csv_path, "r", encoding="utf-8-sig", newline="") as fb:
         rb = csv.DictReader(fb, delimiter=';')
@@ -385,7 +387,7 @@ def generate_budgets_pdf(title, budget_csv_path, results_csv_path, out_pdf_path,
             data_by_seg[seg].setdefault(pid, [])
             data_by_seg[seg][pid].append(row)
 
-    # Document skeleton
+    # Document
     doc = SimpleDocTemplate(out_pdf_path, pagesize=landscape(A4),
                             topMargin=14, bottomMargin=14, leftMargin=10, rightMargin=10)
     styles = getSampleStyleSheet()
@@ -394,31 +396,28 @@ def generate_budgets_pdf(title, budget_csv_path, results_csv_path, out_pdf_path,
     h3_style     = ParagraphStyle("H3PL",     parent=styles["Heading3"], fontName=font_main, fontSize=9.5, leading=11)
     cell_style   = ParagraphStyle("CellPL",   parent=styles["BodyText"], fontName=font_main, fontSize=7.2, leading=8.6)
 
-    def P(txt, st=cell_style): return Paragraph(str(txt), st)
-
     story = []
+    mode_name = "COMPACT" if mode=='compact' else "FULL (z jednostkami)"
     story.append(Paragraph(f"Budżety niepewności – kalibracja tłoka: {title}", title_style))
+    story.append(Paragraph(f"Tryb eksportu PDF: {mode_name}", h3_style))
     story.append(Spacer(1, 6))
 
-    # 1) Cover: global + per-k summary compact
-    header = ["k","n","V̄n [l]","s(Vn) [l]","uA [l]","uB(RMS) [l]","u(V̄n) [l]","U(k=2) [l]","V̄n ± u","V̄n ± U"]
-    sum_table = [header]
-    all_Vn = []; all_u = []
-    for k in sorted(per_k_vals.keys()):
-        V = np.array(per_k_vals[k]["Vn"], dtype=float)
-        Uv= np.array(per_k_vals[k]["uVn"], dtype=float)
-        n = len(V)
-        Vn_mean = float(np.mean(V))
-        s = float(np.std(V, ddof=1)) if n>1 else 0.0
-        uA = s/math.sqrt(n) if n>1 else 0.0
-        uB = float(math.sqrt(np.mean(Uv**2))) if n>=1 else 0.0
-        u  = math.sqrt(uA**2 + uB**2)
-        U2 = 2.0*u
-        sum_table.append([k, n, fmt(Vn_mean), fmt(s), fmt(uA), fmt(uB), fmt(u), fmt(U2),
-                          format_V_pm_u(Vn_mean, u, 'l', 2), format_V_pm_u(Vn_mean, U2, 'l', 2)])
-        all_Vn.extend(V.tolist()); all_u.extend(Uv.tolist())
-
+    # Summary per k as one joint table
     if per_k_vals:
+        header = ["k","n","V̄n [l]","s(Vn) [l]","uA [l]","uB(RMS) [l]","u(V̄n) [l]","U(k=2) [l]","V̄n ± u","V̄n ± U"]
+        sum_table = [header]
+        all_Vn = []; all_u = []
+        for k in sorted(per_k_vals.keys()):
+            V = np.array(per_k_vals[k]["Vn"], dtype=float); Uv = np.array(per_k_vals[k]["uVn"], dtype=float)
+            n = len(V); Vn_mean = float(np.mean(V))
+            s = float(np.std(V, ddof=1)) if n>1 else 0.0
+            uA = s / math.sqrt(n) if n>1 else 0.0
+            uB = float(math.sqrt(np.mean(Uv**2))) if n>=1 else 0.0
+            u  = math.sqrt(uA**2 + uB**2); U2 = 2.0*u
+            sum_table.append([k, n, fmt(Vn_mean), fmt(s), fmt(uA), fmt(uB), fmt(u), fmt(U2),
+                              format_V_pm_u(Vn_mean, u, "l", 2), format_V_pm_u(Vn_mean, U2, "l", 2)])
+            all_Vn.extend(V.tolist()); all_u.extend(Uv.tolist())
+
         t = Table(sum_table, repeatRows=1)
         t.setStyle(TableStyle([
             ('FONTNAME', (0,0), (-1,-1), font_main),
@@ -429,46 +428,14 @@ def generate_budgets_pdf(title, budget_csv_path, results_csv_path, out_pdf_path,
             ('ALIGN', (0,1), (-1,-1), 'CENTER'),
         ]))
         story.append(Paragraph("Podsumowanie per segment (po redukcji do 20°C, 0 bar[g])", h2_style))
-        story.append(Spacer(1, 3))
-        story.append(t)
+        story.append(Spacer(1, 3)); story.append(t); story.append(Spacer(1, 8))
 
-    story.append(PageBreak())
-
-    # 2) Separate pages with summary tables for each k (only stats)
-    for k in sorted(per_k_vals.keys()):
-        story.append(Paragraph(f"Segment k = {k} — Podsumowanie", h2_style))
-        V = np.array(per_k_vals[k]["Vn"], dtype=float)
-        Uv= np.array(per_k_vals[k]["uVn"], dtype=float)
-        n = len(V)
-        Vn_mean = float(np.mean(V))
-        s = float(np.std(V, ddof=1)) if n>1 else 0.0
-        uA = s/math.sqrt(n) if n>1 else 0.0
-        uB = float(math.sqrt(np.mean(Uv**2))) if n>=1 else 0.0
-        u  = math.sqrt(uA**2 + uB**2)
-        U2 = 2.0*u
-        tbl = [
-            ["n", "V̄n [l]", "s(Vn) [l]", "uA [l]", "uB(RMS) [l]", "u(V̄n) [l]", "U(k=2) [l]", "V̄n ± u", "V̄n ± U"],
-            [n, fmt(Vn_mean), fmt(s), fmt(uA), fmt(uB), fmt(u), fmt(U2),
-             format_V_pm_u(Vn_mean, u, 'l', 2), format_V_pm_u(Vn_mean, U2, 'l', 2)]
-        ]
-        t2 = Table(tbl, repeatRows=1)
-        t2.setStyle(TableStyle([
-            ('FONTNAME', (0,0), (-1,-1), font_main),
-            ('FONTSIZE', (0,0), (-1,-1), 8.2),
-            ('GRID', (0,0), (-1,-1), 0.35, colors.grey),
-            ('BACKGROUND', (0,0), (-1,0), colors.whitesmoke),
-            ('ALIGN', (0,0), (-1,0), 'CENTER'),
-            ('ALIGN', (0,1), (-1,-1), 'CENTER'),
-        ]))
-        story.append(t2)
-        story.append(PageBreak())
-
-    # 3) Budgets per segment->measurement
+    # Table schema
     if mode == 'compact':
         header = ["Xi","xi","u(xi)","rozkład","Ci","ui(y)","% udział"]
-        widths = [0.18, 0.18, 0.18, 0.12, 0.14, 0.14, 0.06]
+        widths = [0.19, 0.18, 0.18, 0.12, 0.14, 0.14, 0.05]
         show_units = False
-    else: # full
+    else:
         header = ["Xi","xi","jedn_xi","u(xi)","jedn_u","rozkład","Ci","jedn_Ci","ui(y)","jedn_ui","% udział"]
         widths = [0.10,0.11,0.07,0.11,0.07,0.10,0.12,0.09,0.12,0.06,0.05]
         show_units = True
@@ -476,23 +443,36 @@ def generate_budgets_pdf(title, budget_csv_path, results_csv_path, out_pdf_path,
     usable_width = landscape(A4)[0] - doc.leftMargin - doc.rightMargin
     col_widths = [p * usable_width for p in widths]
 
+    # Budgets per segment -> measurement
     for seg in sorted(data_by_seg.keys()):
         story.append(Paragraph(f"Segment k = {seg}", h2_style))
         story.append(Spacer(1, 3))
 
-        # sort measurements by numeric id if possible
+        # sort meas ids numerically when possible
         def _to_int(x):
             try: return int(x)
             except: return 10**9
         for pid in sorted(data_by_seg[seg].keys(), key=_to_int):
             story.append(Paragraph(f"Pomiar {pid}", h3_style))
             rows = data_by_seg[seg][pid]
+            # Keep only Vn budgets
             rows = [r for r in rows if (r.get("wielkość") or "").startswith("Vn")]
             if not rows: 
                 continue
 
+            # Build table rows; compute SUM from components, not from CSV's last row
             table_data = [header]
+            ui_components = []
             for r in rows:
+                xi = r.get("Xi","")
+                ui_val = r.get("ui(y)","")
+                # acc components except explicit SUMA row
+                if str(xi).strip().upper() != "SUMA":
+                    try:
+                        ui_components.append(float(str(ui_val).replace(",", ".")))
+                    except Exception:
+                        pass
+
                 if show_units:
                     table_data.append([
                         r.get("Xi",""),
@@ -503,7 +483,7 @@ def generate_budgets_pdf(title, budget_csv_path, results_csv_path, out_pdf_path,
                         r.get("rozkład",""),
                         fmt(r.get("Ci","")),
                         r.get("jedn_Ci",""),
-                        fmt(r.get("ui(y)","")),
+                        fmt(ui_val),
                         r.get("jedn_ui",""),
                         fmt_pct(r.get("% udział","")),
                     ])
@@ -514,12 +494,21 @@ def generate_budgets_pdf(title, budget_csv_path, results_csv_path, out_pdf_path,
                         fmt(r.get("u(xi)","")),
                         r.get("rozkład",""),
                         fmt(r.get("Ci","")),
-                        fmt(r.get("ui(y)","")),
+                        fmt(ui_val),
                         fmt_pct(r.get("% udział","")),
                     ])
 
-            # Split big tables into chunks of max_rows to ensure they fit vertically
-            max_rows = 28  # header + 27 rows (safe on A4 landscape with our fonts)
+            # Append computed SUMA row
+            rss = math.sqrt(sum(u*u for u in ui_components)) if ui_components else 0.0
+            if show_units:
+                table_data.append(["SUMA","","","","","", "", "", fmt(rss), "l", "100.00"])
+            else:
+                table_data.append(["SUMA","", "", "", "", fmt(rss), "100.00"])
+
+            # Chunk long tables
+            max_rows = 28
+            from reportlab.platypus import Table
+            t_chunks = []
             for i in range(0, len(table_data), max_rows):
                 chunk = table_data[i:i+max_rows]
                 t = Table(chunk, colWidths=col_widths, repeatRows=1)
@@ -540,6 +529,8 @@ def generate_budgets_pdf(title, budget_csv_path, results_csv_path, out_pdf_path,
 
     doc.build(story)
     return True
+
+# ===================== Tryb CSV (główny) =====================
 def run_mode_csv():
     in_path = input("Ścieżka do pliku wejściowego CSV: ").strip().strip('"')
     if not in_path or not os.path.isfile(in_path):
@@ -602,11 +593,11 @@ def run_mode_csv():
             # Rekalkulacja kluczowych liczb do podsumowania i per k
             k     = int(get_num(rn, 'k') or 0)
             m     = get_num(rn, 'm'); T = get_num(rn, 't'); p = get_num(rn, 'p'); rod = get_num(rn, 'rod')
-            um    = (parse_float(rn.get("um")) or 0.0)
-            uT    = (parse_float(rn.get("ut")) or 0.0)
-            up    = (parse_float(rn.get("up")) or 0.0)
-            urod  = (parse_float(rn.get("urod")) or 0.0)
-            dTmax = (parse_float(rn.get("dtmax")) or 0.0)
+            um    = (get_num(rn, 'um') or 0.0)
+            uT    = (get_num(rn, 'ut') or 0.0)
+            up    = (get_num(rn, 'up') or 0.0)
+            urod  = (get_num(rn, 'urod') or 0.0)
+            dTmax = (get_num(rn, 'dtmax') or 0.0)
 
             Vc = objetosc(m,T,p,rod)
             Cm   = 0.0 if um == 0 else (objetosc(m + um, T, p, rod)   - objetosc(m - um, T, p, rod))   / (2 * um)
@@ -690,7 +681,7 @@ def run_mode_csv():
             format_V_pm_u(Vn_mean, U, "l", 2)
         ], delimiter=';')
 
-        # PDF (compact)
+        # PDF (compact + full)
         gen = input("Wygenerować PDF z budżetami? (T/N): ").strip().upper()
         if gen == "T":
             ok1 = generate_budgets_pdf(title, out_budgets, out_results, f"{title}_budzety_compact.pdf", mode='compact')
@@ -748,7 +739,7 @@ def run_mode_manual():
               "um": str(um), "ut": str(uT), "up": str(up), "urod": str(urod), "dtmax": str(dTmax)}
 
         ok = process_measurement(rn, out_results, out_budgets, meas_id, title,
-                                 D_mm, z_mm, E_GPa, nu, alphaV, delimiter=';')
+                                 D_mm, z_mm, E_GPA, nu, alphaV, delimiter=';')
         if ok:
             # re-licz tylko do per-k
             Vc = objetosc(m,T,p,rod)
@@ -806,8 +797,9 @@ def run_mode_manual():
 
         gen = input("Wygenerować PDF z budżetami? (T/N): ").strip().upper()
         if gen == "T":
-            ok = generate_budgets_pdf(title, out_budgets, out_results, f"{title}_budzety.pdf", compact=True)
-            if ok: print(f"PDF zapisany: {title}_budzety.pdf")
+            ok1 = generate_budgets_pdf(title, out_budgets, out_results, f"{title}_budzety_compact.pdf", mode='compact')
+            ok2 = generate_budgets_pdf(title, out_budgets, out_results, f"{title}_budzety_full.pdf", mode='full')
+            if ok1 or ok2: print(f"PDF zapisane: {title}_budzety_compact.pdf, {title}_budzety_full.pdf")
 
 # ===================== Main =====================
 def main():
