@@ -739,7 +739,7 @@ def run_mode_manual():
               "um": str(um), "ut": str(uT), "up": str(up), "urod": str(urod), "dtmax": str(dTmax)}
 
         ok = process_measurement(rn, out_results, out_budgets, meas_id, title,
-                                 D_mm, z_mm, E_GPA, nu, alphaV, delimiter=';')
+                                 D_mm, z_mm, E_GPa, nu, alphaV, delimiter=';')
         if ok:
             # re-licz tylko do per-k
             Vc = objetosc(m,T,p,rod)
